@@ -28,7 +28,10 @@ install_debian_packages() {
     # Ensure apt is in non-interactive to avoid prompts
     export DEBIAN_FRONTEND=noninteractive
 
-    local package_list="apt-utils \
+    local package_list=""
+    if [ "${PACKAGES_ALREADY_INSTALLED}" != "true" ]; then
+        package_list="${package_list} \
+        apt-utils \
         openssh-client \
         gnupg2 \
         dirmngr \
@@ -45,6 +48,7 @@ install_debian_packages() {
         ca-certificates \
         unzip \
         bzip2 \
+        xz-utils \
         zip \
         nano \
         vim-tiny \
@@ -70,6 +74,34 @@ install_debian_packages() {
         manpages-dev \
         init-system-helpers"
 
+        # Include libssl1.1 if available
+        if [[ ! -z $(apt-cache --names-only search ^libssl1.1$) ]]; then
+            package_list="${package_list} libssl1.1"
+        fi
+
+        # Include libssl3 if available
+        if [[ ! -z $(apt-cache --names-only search ^libssl3$) ]]; then
+            package_list="${package_list} libssl3"
+        fi
+
+        # Include appropriate version of libssl1.0.x if available
+        local libssl_package=$(dpkg-query -f '${db:Status-Abbrev}\t${binary:Package}\n' -W 'libssl1\.0\.?' 2>&1 || echo '')
+        if [ "$(echo "$libssl_package" | grep -o 'libssl1\.0\.[0-9]:' | uniq | sort | wc -l)" -eq 0 ]; then
+            if [[ ! -z $(apt-cache --names-only search ^libssl1.0.2$) ]]; then
+                # Debian 9
+                package_list="${package_list} libssl1.0.2"
+            elif [[ ! -z $(apt-cache --names-only search ^libssl1.0.0$) ]]; then
+                # Ubuntu 18.04
+                package_list="${package_list} libssl1.0.0"
+            fi
+        fi
+
+        # Include git if not already installed (may be more recent than distro version)
+        if ! type git > /dev/null 2>&1; then
+            package_list="${package_list} git"
+        fi
+    fi
+
     # Needed for adding manpages-posix and manpages-posix-dev which are non-free packages in Debian
     if [ "${ADD_NON_FREE_PACKAGES}" = "true" ]; then
         # Bring in variables from /etc/os-release like VERSION_CODENAME
@@ -86,33 +118,6 @@ install_debian_packages() {
         sed -i "s/deb-src http:\/\/security\.debian\.org\/debian-security ${VERSION_CODENAME}-security main/deb http:\/\/security\.debian\.org\/debian-security ${VERSION_CODENAME}-security main contrib non-free/" /etc/apt/sources.list
         echo "Running apt-get update..."
         package_list="${package_list} manpages-posix manpages-posix-dev"
-    fi
-
-    # Include libssl1.1 if available
-    if [[ ! -z $(apt-cache --names-only search ^libssl1.1$) ]]; then
-        package_list="${package_list} libssl1.1"
-    fi
-
-    # Include libssl3 if available
-    if [[ ! -z $(apt-cache --names-only search ^libssl3$) ]]; then
-        package_list="${package_list} libssl3"
-    fi
-
-    # Include appropriate version of libssl1.0.x if available
-    local libssl_package=$(dpkg-query -f '${db:Status-Abbrev}\t${binary:Package}\n' -W 'libssl1\.0\.?' 2>&1 || echo '')
-    if [ "$(echo "$libssl_package" | grep -o 'libssl1\.0\.[0-9]:' | uniq | sort | wc -l)" -eq 0 ]; then
-        if [[ ! -z $(apt-cache --names-only search ^libssl1.0.2$) ]]; then
-            # Debian 9
-            package_list="${package_list} libssl1.0.2"
-        elif [[ ! -z $(apt-cache --names-only search ^libssl1.0.0$) ]]; then
-            # Ubuntu 18.04
-            package_list="${package_list} libssl1.0.0"
-        fi
-    fi
-
-    # Include git if not already installed (may be more recent than distro version)
-    if ! type git > /dev/null 2>&1; then
-        package_list="${package_list} git"
     fi
 
     # Install the list of packages
@@ -139,6 +144,8 @@ install_debian_packages() {
         LOCALE_ALREADY_SET="true"
     fi
 
+    PACKAGES_ALREADY_INSTALLED="true"
+
     # Clean up
     apt-get -y clean
     rm -rf /var/lib/apt/lists/*
@@ -146,59 +153,70 @@ install_debian_packages() {
 
 # RedHat / RockyLinux / CentOS / Fedora packages
 install_redhat_packages() {
-    local package_list="\
-        gawk \
-        openssh-clients \
-        gnupg2 \
-        iproute \
-        procps \
-        lsof \
-        net-tools \
-        psmisc \
-        wget \
-        ca-certificates \
-        rsync \
-        unzip \
-        zip \
-        nano \
-        vim-minimal \
-        less \
-        jq \
-        openssl-libs \
-        krb5-libs \
-        libicu \
-        zlib \
-        sudo \
-        sed \
-        grep \
-        which \
-        man-db \
-        strace"
-
+    local package_list=""
+    local remove_epel="false"
     local install_cmd=dnf
     if ! type dnf > /dev/null 2>&1; then
         install_cmd=yum
     fi
 
-    # rockylinux:9 installs 'curl-minimal' which clashes with 'curl'
-    # Install 'curl' for every OS except this rockylinux:9
-    if [[ "${ID}" = "rocky" ]] && [[ "${VERSION}" != *"9."* ]]; then
-        package_list="${package_list} curl"
-    fi
+    if [ "${PACKAGES_ALREADY_INSTALLED}" != "true" ]; then
+        package_list="${package_list} \
+            gawk \
+            openssh-clients \
+            gnupg2 \
+            iproute \
+            procps \
+            lsof \
+            net-tools \
+            psmisc \
+            wget \
+            ca-certificates \
+            rsync \
+            unzip \
+            xz \
+            zip \
+            nano \
+            vim-minimal \
+            less \
+            jq \
+            openssl-libs \
+            krb5-libs \
+            libicu \
+            zlib \
+            sudo \
+            sed \
+            grep \
+            which \
+            man-db \
+            strace"
 
-    # Install OpenSSL 1.0 compat if needed
-    if ${install_cmd} -q list compat-openssl10 >/dev/null 2>&1; then
-        package_list="${package_list} compat-openssl10"
-    fi
+        # rockylinux:9 installs 'curl-minimal' which clashes with 'curl'
+        # Install 'curl' for every OS except this rockylinux:9
+        if [[ "${ID}" = "rocky" ]] && [[ "${VERSION}" != *"9."* ]]; then
+            package_list="${package_list} curl"
+        fi
 
-    # Install lsb_release if available
-    if ${install_cmd} -q list redhat-lsb-core >/dev/null 2>&1; then
-        package_list="${package_list} redhat-lsb-core"
-    fi
+        # Install OpenSSL 1.0 compat if needed
+        if ${install_cmd} -q list compat-openssl10 >/dev/null 2>&1; then
+            package_list="${package_list} compat-openssl10"
+        fi
 
-    # Install git if not already installed (may be more recent than distro version)
-    if ! type git > /dev/null 2>&1; then
-        package_list="${package_list} git"
+        # Install lsb_release if available
+        if ${install_cmd} -q list redhat-lsb-core >/dev/null 2>&1; then
+            package_list="${package_list} redhat-lsb-core"
+        fi
+
+        # Install git if not already installed (may be more recent than distro version)
+        if ! type git > /dev/null 2>&1; then
+            package_list="${package_list} git"
+        fi
+
+        # Install EPEL repository if needed (required to install 'jq' for CentOS)
+        if ! ${install_cmd} -q list jq >/dev/null 2>&1; then
+            ${install_cmd} -y install epel-release
+            remove_epel="true"
+        fi
     fi
 
     # Install zsh if needed
@@ -206,14 +224,9 @@ install_redhat_packages() {
         package_list="${package_list} zsh"
     fi
 
-    # Install EPEL repository if needed (required to install 'jq' for CentOS)
-    local remove_epel="false"
-    if ! ${install_cmd} -q list jq >/dev/null 2>&1; then
-        ${install_cmd} -y install epel-release
-        remove_epel="true"
+    if [ -n "${package_list}" ]; then
+        ${install_cmd} -y install ${package_list}
     fi
-
-    ${install_cmd} -y install ${package_list}
 
     # Get to latest versions of all packages
     if [ "${UPGRADE_PACKAGES}" = "true" ]; then
@@ -223,63 +236,76 @@ install_redhat_packages() {
     if [[ "${remove_epel}" = "true" ]]; then
         ${install_cmd} -y remove epel-release
     fi
+
+    PACKAGES_ALREADY_INSTALLED="true"
 }
 
 # Alpine Linux packages
 install_alpine_packages() {
     apk update
-    apk add --no-cache \
-        openssh-client \
-        gnupg \
-        procps \
-        lsof \
-        htop \
-        net-tools \
-        psmisc \
-        curl \
-        wget \
-        rsync \
-        ca-certificates \
-        unzip \
-        zip \
-        nano \
-        vim \
-        less \
-        jq \
-        libgcc \
-        libstdc++ \
-        krb5-libs \
-        libintl \
-        libssl1.1 \
-        lttng-ust \
-        tzdata \
-        userspace-rcu \
-        zlib \
-        sudo \
-        coreutils \
-        sed \
-        grep \
-        which \
-        ncdu \
-        shadow \
-        strace
 
-    # Install man pages - package name varies between 3.12 and earlier versions
-    if apk info man > /dev/null 2>&1; then
-        apk add --no-cache man man-pages
-    else
-        apk add --no-cache mandoc man-pages
-    fi
+    if [ "${PACKAGES_ALREADY_INSTALLED}" != "true" ]; then
+        apk add --no-cache \
+            openssh-client \
+            gnupg \
+            procps \
+            lsof \
+            htop \
+            net-tools \
+            psmisc \
+            curl \
+            wget \
+            rsync \
+            ca-certificates \
+            unzip \
+            xz \
+            zip \
+            nano \
+            vim \
+            less \
+            jq \
+            libgcc \
+            libstdc++ \
+            krb5-libs \
+            libintl \
+            lttng-ust \
+            tzdata \
+            userspace-rcu \
+            zlib \
+            sudo \
+            coreutils \
+            sed \
+            grep \
+            which \
+            ncdu \
+            shadow \
+            strace
 
-    # Install git if not already installed (may be more recent than distro version)
-    if ! type git > /dev/null 2>&1; then
-        apk add --no-cache git
+        # # Include libssl1.1 if available (not available for 3.19 and newer)
+        LIBSSL1_PKG=libssl1.1
+        if [[ $(apk search --no-cache -a $LIBSSL1_PKG | grep $LIBSSL1_PKG) ]]; then
+            apk add --no-cache $LIBSSL1_PKG
+        fi
+
+        # Install man pages - package name varies between 3.12 and earlier versions
+        if apk info man > /dev/null 2>&1; then
+            apk add --no-cache man man-pages
+        else
+            apk add --no-cache mandoc man-pages
+        fi
+
+        # Install git if not already installed (may be more recent than distro version)
+        if ! type git > /dev/null 2>&1; then
+            apk add --no-cache git
+        fi
     fi
 
     # Install zsh if needed
     if [ "${INSTALL_ZSH}" = "true" ] && ! type zsh > /dev/null 2>&1; then
         apk add --no-cache zsh
     fi
+
+    PACKAGES_ALREADY_INSTALLED="true"
 }
 
 # ******************
@@ -318,20 +344,17 @@ else
 fi
 
 # Install packages for appropriate OS
-if [ "${PACKAGES_ALREADY_INSTALLED}" != "true" ]; then
-    case "${ADJUSTED_ID}" in
-        "debian")
-            install_debian_packages
-            ;;
-        "rhel")
-            install_redhat_packages
-            ;;
-        "alpine")
-            install_alpine_packages
-            ;;
-    esac
-    PACKAGES_ALREADY_INSTALLED="true"
-fi
+case "${ADJUSTED_ID}" in
+    "debian")
+        install_debian_packages
+        ;;
+    "rhel")
+        install_redhat_packages
+        ;;
+    "alpine")
+        install_alpine_packages
+        ;;
+esac
 
 # If in automatic mode, determine if a user already exists, if not use vscode
 if [ "${USERNAME}" = "auto" ] || [ "${USERNAME}" = "automatic" ]; then
@@ -394,6 +417,9 @@ fi
 
 if [ "${USERNAME}" = "root" ]; then
     user_home="/root"
+# Check if user already has a home directory other than /home/${USERNAME}
+elif [ "/home/${USERNAME}" != $( getent passwd $USERNAME | cut -d: -f6 ) ]; then
+    user_home=$( getent passwd $USERNAME | cut -d: -f6 )
 else
     user_home="/home/${USERNAME}"
     if [ ! -d "${user_home}" ]; then
@@ -405,6 +431,7 @@ fi
 # Restore user .bashrc / .profile / .zshrc defaults from skeleton file if it doesn't exist or is empty
 possible_rc_files=( ".bashrc" ".profile" )
 [ "$INSTALL_OH_MY_ZSH_CONFIG" == "true" ] && possible_rc_files+=('.zshrc')
+[ "$INSTALL_ZSH" == "true" ] && possible_rc_files+=('.zprofile')
 for rc_file in "${possible_rc_files[@]}"; do
     if [ -f "/etc/skel/${rc_file}" ]; then
         if [ ! -e "${user_home}/${rc_file}" ] || [ ! -s "${user_home}/${rc_file}" ]; then
@@ -440,13 +467,19 @@ fi
 
 # Optionally configure zsh and Oh My Zsh!
 if [ "${INSTALL_ZSH}" = "true" ]; then
+   if [ ! -f "${user_home}/.zprofile" ]; then
+        touch "${user_home}/.zprofile"
+        echo 'source $HOME/.profile' >> "${user_home}/.zprofile" # TODO: Reconsider adding '.profile' to '.zprofile'
+        chown ${USERNAME}:${group_name} "${user_home}/.zprofile"
+    fi
+
     if [ "${ZSH_ALREADY_INSTALLED}" != "true" ]; then
         if [ "${ADJUSTED_ID}" = "rhel" ]; then
              global_rc_path="/etc/zshrc"
         else
             global_rc_path="/etc/zsh/zshrc"
         fi
-        cat "${FEATURE_DIR}/scripts/rc_snippet.sh" >> /etc/zshrc
+        cat "${FEATURE_DIR}/scripts/rc_snippet.sh" >> ${global_rc_path}
         ZSH_ALREADY_INSTALLED="true"
     fi
 
@@ -500,7 +533,7 @@ if [ "${INSTALL_ZSH}" = "true" ]; then
             copy_to_user_files=("${oh_my_install_dir}")
             [ -f "$user_rc_file" ] && copy_to_user_files+=("$user_rc_file")
             cp -rf "${copy_to_user_files[@]}" /root
-            chown -R ${USERNAME}:${group_name} "${oh_my_install_dir}" "${user_rc_file}"
+            chown -R ${USERNAME}:${group_name} "${copy_to_user_files[@]}"
         fi
     fi
 fi

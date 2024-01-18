@@ -77,6 +77,25 @@ receive_gpg_keys() {
             sleep 10s
         fi
     done
+
+    # If all attempts fail, try getting the keyserver IP address and explicitly passing it to gpg
+    if [ "${gpg_ok}" = "false" ]; then
+        retry_count=0;
+        echo "(*) Resolving GPG keyserver IP address..."
+        local keyserver_ip_address=$( dig +short keyserver.ubuntu.com | head -n1 )
+        echo "(*) GPG keyserver IP address $keyserver_ip_address"
+        
+        until [ "${gpg_ok}" = "true" ] || [ "${retry_count}" -eq "3" ]; 
+        do
+            echo "(*) Downloading GPG key..."
+            ( echo "${keys}" | xargs -n 1 gpg -q ${keyring_args} --recv-keys --keyserver ${keyserver_ip_address}) 2>&1 && gpg_ok="true"
+            if [ "${gpg_ok}" != "true" ]; then
+                echo "(*) Failed getting key, retring in 10s..."
+                (( retry_count++ ))
+                sleep 10s
+            fi
+        done
+    fi
     set -e
     if [ "${gpg_ok}" = "false" ]; then
         echo "(!) Failed to get gpg key."
@@ -165,7 +184,8 @@ ensure_cosign() {
 
     if ! type cosign > /dev/null 2>&1; then
         echo "Installing cosign..."
-        local LATEST_COSIGN_VERSION=$(curl https://api.github.com/repos/sigstore/cosign/releases/latest | grep tag_name | cut -d : -f2 | tr -d "v\", ")
+        LATEST_COSIGN_VERSION="latest"
+        find_version_from_git_tags LATEST_COSIGN_VERSION 'https://github.com/sigstore/cosign'
         curl -L "https://github.com/sigstore/cosign/releases/latest/download/cosign_${LATEST_COSIGN_VERSION}_${architecture}.deb" -o /tmp/cosign_${LATEST_COSIGN_VERSION}_${architecture}.deb
         
         dpkg -i /tmp/cosign_${LATEST_COSIGN_VERSION}_${architecture}.deb
@@ -182,7 +202,7 @@ ensure_cosign() {
 export DEBIAN_FRONTEND=noninteractive
 
 # Install dependencies if missing
-check_packages curl ca-certificates gnupg2 dirmngr coreutils unzip
+check_packages curl ca-certificates gnupg2 dirmngr coreutils unzip dnsutils
 if ! type git > /dev/null 2>&1; then
     check_packages git
 fi
