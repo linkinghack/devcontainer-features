@@ -9,7 +9,8 @@
 
 DOCKER_VERSION="${VERSION:-"latest"}"
 USE_MOBY="${MOBY:-"true"}"
-DOCKER_DASH_COMPOSE_VERSION="${DOCKERDASHCOMPOSEVERSION:-"v1"}" # v1 or v2 or none
+MOBY_BUILDX_VERSION="${MOBYBUILDXVERSION:-"latest"}"
+DOCKER_DASH_COMPOSE_VERSION="${DOCKERDASHCOMPOSEVERSION:-"v2"}" # v1 or v2 or none
 
 ENABLE_NONROOT_DOCKER="${ENABLE_NONROOT_DOCKER:-"true"}"
 SOURCE_SOCKET="${SOURCE_SOCKET:-"/var/run/docker-host.sock"}"
@@ -98,6 +99,22 @@ find_version_from_git_tags() {
     echo "${variable_name}=${!variable_name}"
 }
 
+# Function to fetch the previous version of the plugin
+get_previous_version() {
+    repo_url=$1
+    # this would del the assets key and then get the second encountered tag_name's value from the filtered array of objects
+    curl -s "$repo_url" | jq -r 'del(.[].assets) | .[0].tag_name' 
+}
+
+
+install_compose_switch_fallback() {
+    echo -e "\n(!) Failed to fetch the latest artifacts for compose-switch v${compose_switch_version}..."
+    previous_version=$(get_previous_version "https://api.github.com/repos/docker/compose-switch/releases")
+    echo -e "\nAttempting to install ${previous_version}"
+    compose_switch_version=${previous_version#v}
+    curl -fsSL "https://github.com/docker/compose-switch/releases/download/v${compose_switch_version}/docker-compose-linux-${architecture}" -o /usr/local/bin/docker-compose
+}
+
 # Ensure apt is in non-interactive to avoid prompts
 export DEBIAN_FRONTEND=noninteractive
 
@@ -170,6 +187,27 @@ else
     echo "cli_version_suffix ${cli_version_suffix}"
 fi
 
+# Version matching for moby-buildx
+if [ "${USE_MOBY}" = "true" ]; then
+    if [ "${MOBY_BUILDX_VERSION}" = "latest" ]; then
+        # Empty, meaning grab whatever "latest" is in apt repo
+        buildx_version_suffix=""
+    else
+        buildx_version_dot_escaped="${MOBY_BUILDX_VERSION//./\\.}"
+        buildx_version_dot_plus_escaped="${buildx_version_dot_escaped//+/\\+}"
+        buildx_version_regex="^(.+:)?${buildx_version_dot_plus_escaped}([\\.\\+ ~:-]|$)"
+        set +e
+            buildx_version_suffix="=$(apt-cache madison moby-buildx | awk -F"|" '{print $2}' | sed -e 's/^[ \t]*//' | grep -E -m 1 "${buildx_version_regex}")"
+        set -e
+        if [ -z "${buildx_version_suffix}" ] || [ "${buildx_version_suffix}" = "=" ]; then
+            err "No full or partial moby-buildx version match found for \"${MOBY_BUILDX_VERSION}\" on OS ${ID} ${VERSION_CODENAME} (${architecture}). Available versions:"
+            apt-cache madison moby-buildx | awk -F"|" '{print $2}' | grep -oP '^(.+:)?\K.+'
+            exit 1
+        fi
+        echo "buildx_version_suffix ${buildx_version_suffix}"
+    fi
+fi
+
 # Install Docker / Moby CLI if not already installed
 if type docker > /dev/null 2>&1; then
     echo "Docker / Moby CLI already installed."
@@ -177,7 +215,7 @@ else
     if [ "${USE_MOBY}" = "true" ]; then
         buildx=()
         if [ "${INSTALL_DOCKER_BUILDX}" = "true" ]; then
-            buildx=(moby-buildx)
+            buildx=(moby-buildx${buildx_version_suffix})
         fi
         apt-get -y install --no-install-recommends ${cli_package_name}${cli_version_suffix} "${buildx[@]}"
         apt-get -y install --no-install-recommends moby-compose || echo "(*) Package moby-compose (Docker Compose v2) not available for OS ${ID} ${VERSION_CODENAME} (${architecture}). Skipping."
@@ -233,7 +271,7 @@ if [ "${DOCKER_DASH_COMPOSE_VERSION}" != "none" ]; then
         echo "(*) Installing compose-switch as docker-compose..."
         compose_switch_version="latest"
         find_version_from_git_tags compose_switch_version "https://github.com/docker/compose-switch"
-        curl -fsSL "https://github.com/docker/compose-switch/releases/download/v${compose_switch_version}/docker-compose-linux-${architecture}" -o /usr/local/bin/docker-compose
+        curl -fsSL "https://github.com/docker/compose-switch/releases/download/v${compose_switch_version}/docker-compose-linux-${architecture}" -o /usr/local/bin/docker-compose || install_compose_switch_fallback
         chmod +x /usr/local/bin/docker-compose
         # TODO: Verify checksum once available: https://github.com/docker/compose-switch/issues/11
     fi
@@ -329,7 +367,7 @@ if [ "${ENABLE_NONROOT_DOCKER}" = "true" ] && [ "${SOURCE_SOCKET}" != "${TARGET_
             log "Enabling socket proxy."
             log "Proxying ${SOURCE_SOCKET} to ${TARGET_SOCKET} for vscode"
             sudoIf rm -rf ${TARGET_SOCKET}
-            (sudoIf socat UNIX-LISTEN:${TARGET_SOCKET},fork,mode=660,user=${USERNAME} UNIX-CONNECT:${SOURCE_SOCKET} 2>&1 | sudoIf tee -a \${SOCAT_LOG} > /dev/null & echo "\$!" | sudoIf tee \${SOCAT_PID} > /dev/null)
+            (sudoIf socat UNIX-LISTEN:${TARGET_SOCKET},fork,mode=660,user=${USERNAME},backlog=128 UNIX-CONNECT:${SOURCE_SOCKET} 2>&1 | sudoIf tee -a \${SOCAT_LOG} > /dev/null & echo "\$!" | sudoIf tee \${SOCAT_PID} > /dev/null)
         else
             log "Socket proxy already running."
         fi
