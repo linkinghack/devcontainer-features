@@ -31,12 +31,7 @@ ADDITIONAL_VERSIONS="${ADDITIONALVERSIONS:-""}"
 # Comma-separated list of additional tools to be installed via pipx.
 IFS="," read -r -a DEFAULT_UTILS <<< "${TOOLSTOINSTALL:-flake8,autopep8,black,yapf,mypy,pydocstyle,pycodestyle,bandit,pipenv,virtualenv,pytest}"
 
-
 PYTHON_SOURCE_GPG_KEYS="64E628F8D684696D B26995E310250568 2D347EA6AA65421D FB9921286F5E1540 3A5CA953F73C700D 04C367C218ADD4FF 0EDDC5F26A45C816 6AF053F07D9DC8D2 C9BE28DEE6DF025C 126EB563A74B06BF D9866941EA5BBD71 ED9D77D5 A821E680E5FA6305"
-GPG_KEY_SERVERS="keyserver hkp://keyserver.ubuntu.com
-keyserver hkp://keyserver.ubuntu.com:80
-keyserver hkps://keys.openpgp.org
-keyserver hkp://keyserver.pgp.com"
 
 KEYSERVER_PROXY="${HTTPPROXY:-"${HTTP_PROXY:-""}"}"
 
@@ -63,6 +58,14 @@ elif [[ "${ID}" = "rhel" || "${ID}" = "fedora" || "${ID}" = "mariner" || "${ID_L
 else
     echo "Linux distro ${ID} not supported."
     exit 1
+fi
+
+if [ "${ADJUSTED_ID}" = "rhel" ] && [ "${VERSION_CODENAME-}" = "centos7" ]; then
+    # As of 1 July 2024, mirrorlist.centos.org no longer exists.
+    # Update the repo files to reference vault.centos.org.
+    sed -i s/mirror.centos.org/vault.centos.org/g /etc/yum.repos.d/*.repo
+    sed -i s/^#.*baseurl=http/baseurl=http/g /etc/yum.repos.d/*.repo
+    sed -i s/^mirrorlist=http/#mirrorlist=http/g /etc/yum.repos.d/*.repo
 fi
 
 # To find some devel packages, some rhel need to enable specific extra repos, but not on RedHat ubi images...
@@ -130,7 +133,39 @@ updaterc() {
     fi
 }
 
-# Import the specified key in a variable name passed in as 
+# Get the list of GPG key servers that are reachable
+get_gpg_key_servers() {
+    declare -A keyservers_curl_map=(
+        ["hkp://keyserver.ubuntu.com"]="http://keyserver.ubuntu.com:11371"
+        ["hkp://keyserver.ubuntu.com:80"]="http://keyserver.ubuntu.com"
+        ["hkps://keys.openpgp.org"]="https://keys.openpgp.org"
+        ["hkp://keyserver.pgp.com"]="http://keyserver.pgp.com:11371"
+    )
+
+    local curl_args=""
+    local keyserver_reachable=false  # Flag to indicate if any keyserver is reachable
+
+    if [ ! -z "${KEYSERVER_PROXY}" ]; then
+        curl_args="--proxy ${KEYSERVER_PROXY}"
+    fi
+
+    for keyserver in "${!keyservers_curl_map[@]}"; do
+        local keyserver_curl_url="${keyservers_curl_map[${keyserver}]}"
+        if curl -s ${curl_args} --max-time 5 ${keyserver_curl_url} > /dev/null; then
+            echo "keyserver ${keyserver}"
+            keyserver_reachable=true
+        else
+            echo "(*) Keyserver ${keyserver} is not reachable." >&2
+        fi
+    done
+
+    if ! $keyserver_reachable; then
+        echo "(!) No keyserver is reachable." >&2
+        exit 1
+    fi
+}
+
+# Import the specified key in a variable name passed in as
 receive_gpg_keys() {
     local keys=${!1}
     local keyring_args=""
@@ -143,21 +178,26 @@ receive_gpg_keys() {
         keyring_args="${keyring_args} --keyserver-options http-proxy=${KEYSERVER_PROXY}"
     fi
 
+    # Install curl
+    if ! type curl > /dev/null 2>&1; then
+        check_packages curl
+    fi
+
     # Use a temporary location for gpg keys to avoid polluting image
     export GNUPGHOME="/tmp/tmp-gnupg"
     mkdir -p ${GNUPGHOME}
     chmod 700 ${GNUPGHOME}
-    echo -e "disable-ipv6\n${GPG_KEY_SERVERS}" > ${GNUPGHOME}/dirmngr.conf
+    echo -e "disable-ipv6\n$(get_gpg_key_servers)" > ${GNUPGHOME}/dirmngr.conf
     # GPG key download sometimes fails for some reason and retrying fixes it.
     local retry_count=0
     local gpg_ok="false"
     set +e
-    until [ "${gpg_ok}" = "true" ] || [ "${retry_count}" -eq "5" ]; 
+    until [ "${gpg_ok}" = "true" ] || [ "${retry_count}" -eq "5" ];
     do
         echo "(*) Downloading GPG key..."
         ( echo "${keys}" | xargs -n 1 gpg -q ${keyring_args} --recv-keys) 2>&1 && gpg_ok="true"
         if [ "${gpg_ok}" != "true" ]; then
-            echo "(*) Failed getting key, retring in 10s..."
+            echo "(*) Failed getting key, retrying in 10s..."
             (( retry_count++ ))
             sleep 10s
         fi
@@ -182,6 +222,11 @@ receive_gpg_keys_centos7() {
         keyring_args="${keyring_args} --keyserver-options http-proxy=${KEYSERVER_PROXY}"
     fi
 
+    # Install curl
+    if ! type curl > /dev/null 2>&1; then
+        check_packages curl
+    fi
+
     # Use a temporary location for gpg keys to avoid polluting image
     export GNUPGHOME="/tmp/tmp-gnupg"
     mkdir -p ${GNUPGHOME}
@@ -193,7 +238,7 @@ receive_gpg_keys_centos7() {
     set +e
         echo "(*) Downloading GPG keys..."
         until [ "${gpg_ok}" = "true" ] || [ "${retry_count}" -eq "5" ]; do
-            for keyserver in $(echo "${GPG_KEY_SERVERS}" | sed 's/keyserver //'); do
+            for keyserver in $(echo "$(get_gpg_key_servers)" | sed 's/keyserver //'); do
                 ( echo "${keys}" | xargs -n 1 gpg -q ${keyring_args} --recv-keys --keyserver=${keyserver} ) 2>&1
                 downloaded_keys=$(gpg --list-keys | grep ^pub | wc -l)
                 if [[ ${num_keys} = ${downloaded_keys} ]]; then
@@ -202,7 +247,7 @@ receive_gpg_keys_centos7() {
                 fi
             done
             if [ "${gpg_ok}" != "true" ]; then
-                echo "(*) Failed getting key, retring in 10s..."
+                echo "(*) Failed getting key, retrying in 10s..."
                 (( retry_count++ ))
                 sleep 10s
             fi
@@ -222,7 +267,7 @@ find_version_from_git_tags() {
     local repository=$2
     local prefix=${3:-"tags/v"}
     local separator=${4:-"."}
-    local last_part_optional=${5:-"false"}    
+    local last_part_optional=${5:-"false"}
     if [ "$(echo "${requested_version}" | grep -o "." | wc -l)" != "2" ]; then
         local escaped_separator=${separator//./\\.}
         local last_part
@@ -282,7 +327,7 @@ find_prev_version_from_git_tags() {
             ((breakfix=breakfix-1))
             if [ "${breakfix}" = "0" ] && [ "${last_part_optional}" = "true" ]; then
                 declare -g ${variable_name}="${major}.${minor}"
-            else 
+            else
                 declare -g ${variable_name}="${major}.${minor}.${breakfix}"
             fi
         fi
@@ -378,32 +423,31 @@ check_packages() {
 
 add_symlink() {
     if [[ ! -d "${CURRENT_PATH}" ]]; then
-        ln -s -r "${INSTALL_PATH}" "${CURRENT_PATH}" 
+        ln -s -r "${INSTALL_PATH}" "${CURRENT_PATH}"
     fi
 
     if [ "${OVERRIDE_DEFAULT_VERSION}" = "true" ]; then
         if [[ $(ls -l ${CURRENT_PATH}) != *"-> ${INSTALL_PATH}"* ]] ; then
             rm "${CURRENT_PATH}"
-            ln -s -r "${INSTALL_PATH}" "${CURRENT_PATH}" 
+            ln -s -r "${INSTALL_PATH}" "${CURRENT_PATH}"
         fi
     fi
 }
 
 install_openssl3() {
-    local _prefix=$1
     mkdir /tmp/openssl3
     (
         cd /tmp/openssl3
         openssl3_version="3.0"
         # Find version using soft match
         find_version_from_git_tags openssl3_version "https://github.com/openssl/openssl" "openssl-"
-        local tgz_filename="openssl-${openssl3_version}.tar.gz" 
+        local tgz_filename="openssl-${openssl3_version}.tar.gz"
         local tgz_url="https://github.com/openssl/openssl/releases/download/openssl-${openssl3_version}/${tgz_filename}"
         echo "Downloading ${tgz_filename}..."
         curl -sSL -o "/tmp/openssl3/${tgz_filename}" "${tgz_url}"
         tar xzf ${tgz_filename}
         cd openssl-${openssl3_version}
-        ./config --prefix=${_prefix} --openssldir=${_prefix} --libdir=lib
+        ./config --libdir=lib
         make -j $(nproc)
         make install_dev
     )
@@ -421,20 +465,22 @@ install_prev_vers_cpython() {
 install_cpython() {
     VERSION=$1
     INSTALL_PATH="${PYTHON_INSTALL_PATH}/${VERSION}"
+
+    # Check if the specified Python version is already installed
     if [ -d "${INSTALL_PATH}" ]; then
         echo "(!) Python version ${VERSION} already exists."
-        exit 1
+    else
+        mkdir -p /tmp/python-src ${INSTALL_PATH}
+        cd /tmp/python-src
+        cpython_tgz_filename="Python-${VERSION}.tgz"
+        cpython_tgz_url="https://www.python.org/ftp/python/${VERSION}/${cpython_tgz_filename}"
+        echo "Downloading ${cpython_tgz_filename}..."
+        curl -sSL -o "/tmp/python-src/${cpython_tgz_filename}" "${cpython_tgz_url}"
     fi
-    mkdir -p /tmp/python-src ${INSTALL_PATH}
-    cd /tmp/python-src
-    cpython_tgz_filename="Python-${VERSION}.tgz"
-    cpython_tgz_url="https://www.python.org/ftp/python/${VERSION}/${cpython_tgz_filename}"
-    echo "Downloading ${cpython_tgz_filename}..."
-    curl -sSL -o "/tmp/python-src/${cpython_tgz_filename}" "${cpython_tgz_url}"
 }
 
 install_from_source() {
-    VERSION=$1  
+    VERSION=$1
     echo "(*) Building Python ${VERSION} from source..."
     if ! type git > /dev/null 2>&1; then
         check_packages git
@@ -444,18 +490,19 @@ install_from_source() {
     find_version_from_git_tags VERSION "https://github.com/python/cpython"
 
     # Some platforms/os versions need modern versions of openssl installed
-    # via common package repositories, for now rhel-7 family, use case statement to 
+    # via common package repositories, for now rhel-7 family, use case statement to
     # make it easy to expand
+    SSL_INSTALL_PATH="/usr/local"
     case ${VERSION_CODENAME} in
         centos7|rhel7)
             check_packages perl-IPC-Cmd
-            install_openssl3 ${INSTALL_PATH}
-            ADDL_CONFIG_ARGS="--with-openssl=${INSTALL_PATH} --with-openssl-rpath=${INSTALL_PATH}/lib"
+            install_openssl3
+            ADDL_CONFIG_ARGS="--with-openssl=${SSL_INSTALL_PATH} --with-openssl-rpath=${SSL_INSTALL_PATH}/lib"
             ;;
     esac
 
     install_cpython "${VERSION}"
-    if [ -f "/tmp/python-src/${cpython_tgz_filename}" ]; then 
+    if [ -f "/tmp/python-src/${cpython_tgz_filename}" ]; then
         if grep -q "404 Not Found" "/tmp/python-src/${cpython_tgz_filename}"; then
             install_prev_vers_cpython "${VERSION}"
         fi
@@ -512,23 +559,23 @@ install_from_source() {
 }
 
 install_using_oryx() {
-    VERSION=$1 
+    VERSION=$1
     INSTALL_PATH="${PYTHON_INSTALL_PATH}/${VERSION}"
-    
+
+    # Check if the specified Python version is already installed
     if [ -d "${INSTALL_PATH}" ]; then
         echo "(!) Python version ${VERSION} already exists."
-        exit 1
+    else
+        # The python install root path may not exist, so create it
+        mkdir -p "${PYTHON_INSTALL_PATH}"
+        oryx_install "python" "${VERSION}" "${INSTALL_PATH}" "lib" || return 1
+
+        ln -s "${INSTALL_PATH}/bin/idle3" "${INSTALL_PATH}/bin/idle"
+        ln -s "${INSTALL_PATH}/bin/pydoc3" "${INSTALL_PATH}/bin/pydoc"
+        ln -s "${INSTALL_PATH}/bin/python3-config" "${INSTALL_PATH}/bin/python-config"
+
+        add_symlink
     fi
-
-    # The python install root path may not exist, so create it
-    mkdir -p "${PYTHON_INSTALL_PATH}"
-    oryx_install "python" "${VERSION}" "${INSTALL_PATH}" "lib" || return 1
-
-    ln -s "${INSTALL_PATH}/bin/idle3" "${INSTALL_PATH}/bin/idle"
-    ln -s "${INSTALL_PATH}/bin/pydoc3" "${INSTALL_PATH}/bin/pydoc"
-    ln -s "${INSTALL_PATH}/bin/python3-config" "${INSTALL_PATH}/bin/python-config"
-
-    add_symlink
 }
 
 sudo_if() {
@@ -727,7 +774,7 @@ if [ "${PYTHON_VERSION}" != "none" ]; then
     usermod -a -G python "${USERNAME}"
 
     CURRENT_PATH="${PYTHON_INSTALL_PATH}/current"
-    
+
     install_python ${PYTHON_VERSION}
 
     # Additional python versions to be installed but not be set as default.
@@ -748,7 +795,7 @@ if [ "${PYTHON_VERSION}" != "none" ]; then
         updaterc "if [[ \"\${PATH}\" != *\"${CURRENT_PATH}/bin\"* ]]; then export PATH=${CURRENT_PATH}/bin:\${PATH}; fi"
         PATH="${INSTALL_PATH}/bin:${PATH}"
     fi
-    
+
     # Updates the symlinks for os-provided, or the installed python version in other cases
     chown -R "${USERNAME}:python" "${PYTHON_INSTALL_PATH}"
     chmod -R g+r+w "${PYTHON_INSTALL_PATH}"
@@ -776,7 +823,7 @@ if [[ "${INSTALL_PYTHON_TOOLS}" = "true" ]] && [[ -n "${PYTHON_SRC}" ]]; then
     umask 0002
     mkdir -p ${PIPX_BIN_DIR}
     chown -R "${USERNAME}:pipx" ${PIPX_HOME}
-    chmod -R g+r+w "${PIPX_HOME}" 
+    chmod -R g+r+w "${PIPX_HOME}"
     find "${PIPX_HOME}" -type d -print0 | xargs -0 -n 1 chmod g+s
 
     # Update pip if not using os provided python
@@ -805,21 +852,21 @@ if [[ "${INSTALL_PYTHON_TOOLS}" = "true" ]] && [[ -n "${PYTHON_SRC}" ]]; then
             echo "${util} already installed. Skipping."
         fi
     done
-    
+
     # Temporary: Removes “setup tools” metadata directory due to https://github.com/advisories/GHSA-r9hx-vwmv-q579
-    if [[ $SKIP_VULNERABILITY_PATCHING = "false" ]]; then 
+    if [[ $SKIP_VULNERABILITY_PATCHING = "false" ]]; then
         VULNERABLE_VERSIONS=("3.10" "3.11")
         RUN_TIME_PY_VER_DETECT=$(${PYTHON_SRC} --version 2>&1)
         PY_MAJOR_MINOR_VER=${RUN_TIME_PY_VER_DETECT:7:4};
         if [[ ${VULNERABLE_VERSIONS[*]} =~ $PY_MAJOR_MINOR_VER ]]; then
             rm -rf  ${PIPX_HOME}/shared/lib/"python${PY_MAJOR_MINOR_VER}"/site-packages/setuptools-65.5.0.dist-info
-            if [[ -e "/usr/local/lib/python${PY_MAJOR_MINOR_VER}/ensurepip/_bundled/setuptools-65.5.0-py3-none-any.whl" ]]; then 
+            if [[ -e "/usr/local/lib/python${PY_MAJOR_MINOR_VER}/ensurepip/_bundled/setuptools-65.5.0-py3-none-any.whl" ]]; then
                 # remove the vulnerable setuptools-65.5.0-py3-none-any.whl file
                 rm /usr/local/lib/python${PY_MAJOR_MINOR_VER}/ensurepip/_bundled/setuptools-65.5.0-py3-none-any.whl
                 # create and change to the setuptools_downloaded directory
                 mkdir -p /tmp/setuptools_downloaded
                 cd /tmp/setuptools_downloaded
-                # download the source distribution for setuptools using pip 
+                # download the source distribution for setuptools using pip
                 pip download setuptools==65.5.1 --no-binary :all:
                 # extract the filename of the setuptools-*.tar.gz file
                 filename=$(find . -maxdepth 1 -type f)
@@ -833,7 +880,7 @@ if [[ "${INSTALL_PYTHON_TOOLS}" = "true" ]] && [[ -n "${PYTHON_SRC}" ]]; then
                 python setup.py bdist_wheel
                 # move inside the dist directory in pwd
                 cd dist
-                # copy this file to the ensurepip/_bundled directory 
+                # copy this file to the ensurepip/_bundled directory
                 cp setuptools-65.5.1-py3-none-any.whl /usr/local/lib/python${PY_MAJOR_MINOR_VER}/ensurepip/_bundled/
                 # replace the version in __init__.py file with the installed version
                 sed -i 's/_SETUPTOOLS_VERSION = \"65\.5\.0\"/_SETUPTOOLS_VERSION = "65.5.1"/g' /usr/local/lib/"python${PY_MAJOR_MINOR_VER}"/ensurepip/__init__.py
@@ -864,6 +911,23 @@ if [ "${INSTALL_JUPYTERLAB}" = "true" ]; then
 
     install_user_package $INSTALL_UNDER_ROOT jupyterlab
     install_user_package $INSTALL_UNDER_ROOT jupyterlab-git
+
+    if [ "$INSTALL_UNDER_ROOT" = false ]; then
+        # JupyterLab would have installed into /home/${USERNAME}/.local/bin
+        # Adding it to default path for Codespaces which use non-login shells
+        SUDOERS_FILE="/etc/sudoers.d/$USERNAME"
+        SEARCH_STR="Defaults secure_path="
+        REPLACE_STR="Defaults secure_path=/home/${USERNAME}/.local/bin"
+
+        if grep -qs ${SEARCH_STR} ${SUDOERS_FILE}; then
+            # string found and file is present
+            sed -i "s|${SEARCH_STR}|${REPLACE_STR}:|g" "${SUDOERS_FILE}"
+        else
+            # either string is not found, or file is not present
+            # In either case take same action, note >> places at end of file
+            echo "${REPLACE_STR}:${PATH}" >> ${SUDOERS_FILE}
+        fi
+    fi
 
     # Configure JupyterLab if needed
     if [ -n "${CONFIGURE_JUPYTERLAB_ALLOW_ORIGIN}" ]; then
