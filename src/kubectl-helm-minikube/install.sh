@@ -224,10 +224,11 @@ get_github_api_repo_url() {
 
 get_helm() {
     HELM_VERSION=$1
+    # helm-3.16.3-linux-amd64.tar.gz
     helm_filename="helm-${HELM_VERSION}-linux-${architecture}.tar.gz"
     tmp_helm_filename="/tmp/helm/${helm_filename}"
-    curl -sSL "https://get.helm.sh/${helm_filename}" -o "${tmp_helm_filename}"
-    curl -sSL "https://github.com/helm/helm/releases/download/${HELM_VERSION}/${helm_filename}.asc" -o "${tmp_helm_filename}.asc"
+    curl -v -L "https://get.helm.sh/${helm_filename}" -o "${tmp_helm_filename}"
+    curl -v -L "https://github.com/helm/helm/releases/download/${HELM_VERSION}/${helm_filename}.asc" -o "${tmp_helm_filename}.asc"
 }
 
 # Get the list of GPG key servers that are reachable
