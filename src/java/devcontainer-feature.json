@@ -18,7 +18,7 @@
       "description": "Select or enter a Java version to install"
     },
     "additionalVersions": {
-      "proposals": ["11", "11,17,20"],
+      "proposals": ["11", "11,17,21,23"],
       "type": "string",
       "default": "",
       "description": "Enter additional Java versions, separated by commas."
@@ -115,6 +115,7 @@
     "PATH": "/usr/local/sdkman/bin:/usr/local/sdkman/candidates/java/current/bin:/usr/local/sdkman/candidates/gradle/current/bin:/usr/local/sdkman/candidates/maven/current/bin:/usr/local/sdkman/candidates/ant/current/bin:${PATH}"
   },
   "installsAfter": [
-    "ghcr.io/devcontainers/features/common-utils"
+    "ghcr.io/devcontainers/features/common-utils",
+    "ghcr.io/linkinghack/devcontainer-features/common-utils"
   ]
 }

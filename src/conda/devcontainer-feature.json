@@ -27,6 +27,7 @@
         "PATH": "/opt/conda/bin:${PATH}"
     },
     "installsAfter": [
-        "ghcr.io/devcontainers/features/common-utils"
+        "ghcr.io/devcontainers/features/common-utils",
+        "ghcr.io/linkinghack/devcontainer-features/common-utils"
     ]
 }

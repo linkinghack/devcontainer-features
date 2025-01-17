@@ -86,6 +86,7 @@
   },
   "installsAfter": [
     "ghcr.io/devcontainers/features/common-utils",
-    "ghcr.io/devcontainers/features/oryx"
+    "ghcr.io/devcontainers/features/oryx",
+    "ghcr.io/linkinghack/devcontainer-features/common-utils"
   ]
 }
