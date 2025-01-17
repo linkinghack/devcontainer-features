@@ -435,5 +435,6 @@ clean_up
 # have group write set. We need this when the gid/uid is updated.
 mkdir -p "${NVM_DIR}/versions"
 chmod -R g+rw "${NVM_DIR}/versions"
+chmod -R a+rwx "${NVM_DIR}"
 
 echo "Done!"
